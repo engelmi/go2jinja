@@ -1,0 +1,29 @@
+name: Unit tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+      
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '^1.23.5'
+      
+      - name: Install python dev depenencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Running unit tests
+        run: |
+          bash tests/run-tests.sh
