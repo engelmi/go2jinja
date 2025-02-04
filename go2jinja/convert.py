@@ -9,6 +9,8 @@ import regex as re
 
 class NodeType(Enum):
     RANGE = "range"
+    CONTINUE = "continue"
+    BREAK = "break"
     IF = "if"
     ELIF = "else if"
     ELSE = "else"
@@ -29,7 +31,12 @@ class Node:
     prev: Optional["Node"]
     next: Optional["Node"]
     parent: Optional["Node"]
+
+    open_scope_node: Optional["Node"] = None
+    end_scope_node: Optional["Node"] = None
     children: list["Node"] = field(default_factory=lambda: [])
+
+    artificial: bool = False
 
 
 class FunctionType(Enum):
@@ -141,6 +148,8 @@ REGEX_NODE_ELIF = (
 REGEX_NODE_ELSE = f"{REGEX_NODE_START_BLOCK}(else){REGEX_NODE_END_BLOCK}"
 REGEX_NODE_END = f"{REGEX_NODE_START_BLOCK}(end){REGEX_NODE_END_BLOCK}"
 REGEX_NODE_RANGE = f"{REGEX_NODE_START_BLOCK}(range)\\s+({REGEX_LOCAL_VARIABLE}\\s*,\\s*{REGEX_LOCAL_VARIABLE}\\s*:=\\s*)?{REGEX_VARIABLE}{REGEX_NODE_END_BLOCK}"
+REGEX_NODE_CONTINUE = f"{REGEX_NODE_START_BLOCK}continue{REGEX_NODE_END_BLOCK}"
+REGEX_NODE_BREAK = f"{REGEX_NODE_START_BLOCK}break{REGEX_NODE_END_BLOCK}"
 REGEX_NODE_STMT = f"{REGEX_NODE_START_BLOCK}({REGEX_VARIABLE}|{REGEX_LOCAL_VARIABLE}){REGEX_NODE_END_BLOCK}"
 REGEX_NODE_ASSIGNMENT = f"{REGEX_NODE_START_BLOCK}{REGEX_LOCAL_VARIABLE}\\s*:?=\\s*{REGEX_NODE_PIPELINE}{REGEX_NODE_END_BLOCK}"
 GO_KEYWORDS: Dict[NodeType, re.Pattern] = {
@@ -151,6 +160,8 @@ GO_KEYWORDS: Dict[NodeType, re.Pattern] = {
     NodeType.RANGE: re.compile(R"{}".format(REGEX_NODE_RANGE), re.S),
     NodeType.STATEMENT: re.compile(R"{}".format(REGEX_NODE_STMT), re.S),
     NodeType.ASSIGNMENT: re.compile(R"{}".format(REGEX_NODE_ASSIGNMENT), re.S),
+    NodeType.CONTINUE: re.compile(R"{}".format(REGEX_NODE_CONTINUE), re.S),
+    NodeType.BREAK: re.compile(R"{}".format(REGEX_NODE_BREAK), re.S),
 }
 
 
@@ -163,6 +174,8 @@ def detect_node_type(stmt: str) -> Optional[NodeType]:
         (NodeType.ELIF, GO_KEYWORDS[NodeType.ELIF]),
         (NodeType.ELSE, GO_KEYWORDS[NodeType.ELSE]),
         (NodeType.END, GO_KEYWORDS[NodeType.END]),
+        (NodeType.CONTINUE, GO_KEYWORDS[NodeType.CONTINUE]),
+        (NodeType.BREAK, GO_KEYWORDS[NodeType.BREAK]),
         (NodeType.ASSIGNMENT, GO_KEYWORDS[NodeType.ASSIGNMENT]),
         (NodeType.STATEMENT, GO_KEYWORDS[NodeType.STATEMENT]),
     ]
@@ -183,20 +196,36 @@ def parse_go_template(content: str) -> list[Node]:
     end_pos = 0
     while start_pos != -1:
 
-        if start_pos - end_pos > 0:
+        if end_pos == 0 and start_pos != 0:
             content_node = Node(
                 end_pos,
                 start_pos,
                 content[end_pos:start_pos],
                 NodeType.CONTENT,
-                None,
-                None,
-                current_scope_nodes,
+                prev=None,
+                next=None,
+                parent=None,
+                children=[],
+                artificial=False,
+            )
+            root_nodes.append(content_node)
+        elif start_pos - end_pos > 0:
+            content_node = Node(
+                end_pos,
+                start_pos,
+                content[end_pos:start_pos],
+                NodeType.CONTENT,
+                prev=None,
+                next=None,
+                parent=None,
+                children=[],
+                artificial=False,
             )
             current_scope_node = (
                 None if not current_scope_nodes else current_scope_nodes[-1]
             )
             if current_scope_node is not None:
+                content_node.parent = current_scope_node
                 current_scope_node.children.append(content_node)
             else:
                 root_nodes.append(content_node)
@@ -215,9 +244,11 @@ def parse_go_template(content: str) -> list[Node]:
             end_pos,
             content[start_pos:end_pos],
             node_type,
-            prev_expr_node,
-            None,
-            None,
+            prev=prev_expr_node,
+            next=None,
+            parent=None,
+            children=[],
+            artificial=False,
         )
         if prev_expr_node is not None:
             prev_expr_node.next = expr_node
@@ -231,7 +262,9 @@ def parse_go_template(content: str) -> list[Node]:
             current_scope_nodes.append(expr_node)
         elif expr_node.type in [NodeType.ELIF, NodeType.ELSE]:
             if current_scope_nodes:
-                current_scope_nodes.pop()
+                prev = current_scope_nodes.pop()
+                prev.end_scope_node = expr_node
+                expr_node.open_scope_node = prev
             current_scope_node = (
                 None if not current_scope_nodes else current_scope_nodes[-1]
             )
@@ -239,7 +272,9 @@ def parse_go_template(content: str) -> list[Node]:
                 expr_node.parent = current_scope_node
             current_scope_nodes.append(expr_node)
         elif expr_node.type == NodeType.END:
-            current_scope_nodes.pop()
+            prev = current_scope_nodes.pop()
+            prev.end_scope_node = expr_node
+            expr_node.open_scope_node = prev
             current_scope_node = (
                 None if not current_scope_nodes else current_scope_nodes[-1]
             )
@@ -267,30 +302,120 @@ def parse_go_template(content: str) -> list[Node]:
             len(content) + 1,
             content[end_pos : len(content) + 1],
             NodeType.CONTENT,
-            None,
-            None,
-            current_scope_nodes,
+            prev=None,
+            next=None,
+            parent=None,
+            children=[],
+            artificial=False,
         )
-        current_scope_node = (
-            None if not current_scope_nodes else current_scope_nodes[-1]
+        root_nodes.append(content_node)
+
+    return root_nodes
+
+
+def translate_continue_nodes(root_nodes: list[Node]) -> list[Node]:
+    continue_nodes: list[Node] = []
+
+    def find_continue_nodes(nodes: list[Node]):
+        for node in nodes:
+            if node.type == NodeType.CONTINUE:
+                continue_nodes.append(node)
+            find_continue_nodes(node.children)
+
+    def add_if_continue_check_block(parent_node: Node, start_index: int) -> None:
+        to_wrap = parent_node.children[start_index:]
+        if not to_wrap:
+            return
+
+        if_node = Node(
+            -1,
+            -1,
+            f"{GO_SYMBOL_OPEN_BRACKETS} {NodeType.IF.value} {FunctionType.NEQUALS.value} {skip_variable} 1 {GO_SYMBOL_CLOSE_BRACKETS}",
+            NodeType.IF,
+            prev=to_wrap[0].prev,
+            next=to_wrap[0],
+            parent=parent_node,
+            children=to_wrap,
+            artificial=True,
         )
-        if current_scope_node is not None:
-            current_scope_node.children.append(content_node)
-        else:
-            root_nodes.append(content_node)
+        end_node = Node(
+            -1,
+            -1,
+            f"{GO_SYMBOL_OPEN_BRACKETS} {NodeType.END.value} {GO_SYMBOL_CLOSE_BRACKETS}",
+            NodeType.END,
+            prev=to_wrap[-1],
+            next=to_wrap[-1].next,
+            parent=if_node,
+            children=[],
+            artificial=True,
+        )
+
+        if_node.end_scope_node = end_node
+        end_node.open_scope_node = if_node
+
+        to_wrap[0].prev = if_node
+        for elem in to_wrap:
+            elem.parent = if_node
+        to_wrap[-1].next = end_node
+
+        parent_node.children = parent_node.children[:start_index] + [if_node, end_node]
+
+    find_continue_nodes(root_nodes)
+
+    skip_variable = "$should_continue"
+    for continue_node in continue_nodes:
+        # find start of loop to initialize continue skip variable
+        #   and add if-end nodes for skipping
+        should_break = False
+        for_node = continue_node.parent
+        while for_node is not None and not should_break:
+            if for_node.type == NodeType.RANGE:
+                initial_set_node = Node(
+                    -1,
+                    -1,
+                    f"{GO_SYMBOL_OPEN_BRACKETS}{SYMBOL_REMOVE_WHITESPACE} {skip_variable} := 0 {SYMBOL_REMOVE_WHITESPACE}{GO_SYMBOL_CLOSE_BRACKETS}",
+                    NodeType.ASSIGNMENT,
+                    prev=for_node,
+                    next=for_node.next,
+                    parent=for_node,
+                    children=[],
+                    artificial=True,
+                )
+                for_node.next.prev = initial_set_node
+                for_node.next = initial_set_node
+                for_node.children = [initial_set_node] + for_node.children
+                should_break = True
+
+            start_index = 0
+            for child in for_node.children:
+                if child.start > continue_node.start and child.type not in [
+                    NodeType.ELIF,
+                    NodeType.END,
+                ]:
+                    continue
+                start_index += 1
+            add_if_continue_check_block(for_node, start_index)
+
+            for_node = for_node.parent
+
+        # transform continue node to assignment node
+        continue_node.type = NodeType.ASSIGNMENT
+        continue_node.start = -1
+        continue_node.end = -1
+        continue_node.content = f"{GO_SYMBOL_OPEN_BRACKETS}{SYMBOL_REMOVE_WHITESPACE if continue_node.content[len(GO_SYMBOL_OPEN_BRACKETS) + 1] == SYMBOL_REMOVE_WHITESPACE else ""}{skip_variable} := 1 {SYMBOL_REMOVE_WHITESPACE if continue_node.content[(len(GO_SYMBOL_CLOSE_BRACKETS) + 1) * -1] == SYMBOL_REMOVE_WHITESPACE else ""}{GO_SYMBOL_CLOSE_BRACKETS}"
+        continue_node.artificial = True
 
     return root_nodes
 
 
 def is_jinja_template(content: str) -> bool:
-    return re.compile(R"{%\-?.+\-?%}").match(content) is not None
+    return re.compile(R".*{%\-?.+\-?%}").match(content) is not None
 
 
 def is_go_template(content: str) -> bool:
-    return (
-        re.compile(R"{{\-?.+\-?}}").match(content) is not None
-        and re.compile(R"{%\-?.+\-?%}").match(content) is None
-    )
+    return re.compile(R".*{{\-?.+\-?}}").match(
+        content
+    ) is not None and not is_jinja_template(content)
 
 
 def go_to_jinja(content: str) -> str:
@@ -429,43 +554,34 @@ def go_to_jinja(content: str) -> str:
                 GO_SYMBOL_OPEN_BRACKETS, JINJA_SYMBOL_OPEN_BRACKETS
             ).replace(GO_SYMBOL_CLOSE_BRACKETS, JINJA_SYMBOL_CLOSE_BRACKETS)
         elif node.type == NodeType.END:
-            closing_count = 1
-            prev = node.prev
-            while prev is not None:
-                if prev.type == NodeType.END:
-                    closing_count += 1
-                elif prev.type in [NodeType.IF, NodeType.RANGE]:
-                    closing_count -= 1
-                if closing_count == 0:
-                    m = GO_KEYWORDS[NodeType.END].match(node.content)
-                    if m is None:
-                        return ""
-                    if prev.type in [NodeType.IF, NodeType.ELIF, NodeType.ELSE]:
-                        return (
-                            node.content[: m.start(1)].replace(
-                                GO_SYMBOL_OPEN_BRACKETS, JINJA_SYMBOL_OPEN_BRACKETS
-                            )
-                            + "endif"
-                            + node.content[m.ends(1)[0] :].replace(
-                                GO_SYMBOL_CLOSE_BRACKETS, JINJA_SYMBOL_CLOSE_BRACKETS
-                            )
-                        )
-                    elif prev.type == NodeType.RANGE:
-                        loop_vars.pop()
-                        if loop_index_vars:
-                            loop_index_vars.pop()
+            m = GO_KEYWORDS[NodeType.END].match(node.content)
+            if m is None:
+                return ""
 
-                        return (
-                            node.content[: m.start(1)].replace(
-                                GO_SYMBOL_OPEN_BRACKETS, JINJA_SYMBOL_OPEN_BRACKETS
-                            )
-                            + "endfor"
-                            + node.content[m.ends(1)[0] :].replace(
-                                GO_SYMBOL_CLOSE_BRACKETS, JINJA_SYMBOL_CLOSE_BRACKETS
-                            )
-                        )
-                    return ""
-                prev = prev.prev
+            if node.open_scope_node.type in [NodeType.IF, NodeType.ELIF, NodeType.ELSE]:
+                return (
+                    node.content[: m.start(1)].replace(
+                        GO_SYMBOL_OPEN_BRACKETS, JINJA_SYMBOL_OPEN_BRACKETS
+                    )
+                    + "endif"
+                    + node.content[m.ends(1)[0] :].replace(
+                        GO_SYMBOL_CLOSE_BRACKETS, JINJA_SYMBOL_CLOSE_BRACKETS
+                    )
+                )
+            elif node.open_scope_node.type == NodeType.RANGE:
+                loop_vars.pop()
+                if loop_index_vars:
+                    loop_index_vars.pop()
+
+                return (
+                    node.content[: m.start(1)].replace(
+                        GO_SYMBOL_OPEN_BRACKETS, JINJA_SYMBOL_OPEN_BRACKETS
+                    )
+                    + "endfor"
+                    + node.content[m.ends(1)[0] :].replace(
+                        GO_SYMBOL_CLOSE_BRACKETS, JINJA_SYMBOL_CLOSE_BRACKETS
+                    )
+                )
         elif node.type == NodeType.ASSIGNMENT:
             m = GO_KEYWORDS[NodeType.ASSIGNMENT].match(node.content)
             if m is not None and len(m.groups()) == 2:
@@ -508,7 +624,7 @@ def go_to_jinja(content: str) -> str:
             res += nodes_to_jinja_str(node.children)
         return res
 
-    return nodes_to_jinja_str(parse_go_template(content))
+    return nodes_to_jinja_str(translate_continue_nodes(parse_go_template(content)))
 
 
 def tree_structure(nodes: list[Node], level: int) -> str:
@@ -516,7 +632,7 @@ def tree_structure(nodes: list[Node], level: int) -> str:
     for node in nodes:
         res += (
             level * "\t"
-            + f"{node.type}: {node.start},{node.end} - {len(node.children)} - {node.content}\n"
+            + f"{node.type}: {node.start},{node.end} - {"--" if node.parent is None else node.parent.type} - {node.content}\n"
         )
         res += tree_structure(node.children, level + 1)
     return res

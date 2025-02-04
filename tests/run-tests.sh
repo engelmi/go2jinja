@@ -10,8 +10,7 @@ function run_tests(){
     pytest -svv \
         --log-cli-level=${LOG_LEVEL} \
         --log-cli-date-format="%Y-%m-%d %H:%M:%S%z" \
-        --log-cli-format="%(asctime)s,%(msecs)03d %(levelname)-7s [%(name)s] %(message)s (%(module)s:%(lineno)d)" \
-        --import-mode=importlib
+        --log-cli-format="%(asctime)s,%(msecs)03d %(levelname)-7s [%(name)s] %(message)s (%(module)s:%(lineno)d)"
 }
 
 function clean(){
