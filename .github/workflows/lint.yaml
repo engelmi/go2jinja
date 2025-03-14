@@ -29,3 +29,7 @@ jobs:
       - name: Run black
         run: |
           black ./ --check --diff
+
+      - name: Validate python is correct
+          /usr/bin/python3 -m compileall -q .
+
