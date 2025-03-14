@@ -8,9 +8,7 @@ on:
   workflow_dispatch:
 
 jobs:
-
   python:
-    name: Python
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
@@ -36,5 +34,6 @@ jobs:
           black ./ --check --diff
 
       - name: Validate python is correct
+        run: |
           /usr/bin/python3 -m compileall -q .
 

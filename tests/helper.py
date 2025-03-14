@@ -48,7 +48,8 @@ def run_test(test_name: str, input_file: str, go_file: str = ""):
     jinjatmpl = convert.go_to_jinja(gotmpl)
 
     go_out = Command(
-        f"{os.path.join(get_test_directory(), "gotemplate", "gotemplate")} -data-file={data_file} -go-template={gotmpl_file}"
+        f"{os.path.join(get_test_directory(), 'gotemplate', 'gotemplate')}"
+        f" -data-file={data_file} -go-template={gotmpl_file}"
     ).run()
 
     data = load_data_file(data_file)
